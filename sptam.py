@@ -37,6 +37,12 @@ class Tracking(object):
 
 
 class SPTAM(object):
+    """
+    - The interaction between tracking and mapping is through keyframes and CovisibilityGraph
+
+    Args:
+        object ([type]): [description]
+    """
     def __init__(self, params):
         self.params = params
 
@@ -49,7 +55,7 @@ class SPTAM(object):
         self.loop_closing = LoopClosing(self, params)
         self.loop_correction = None
         
-        self.reference = None        # reference keyframe
+        self.reference = None        # reference keyframe which contains the most local map points 
         self.preceding = None        # last keyframe
         self.current = None          # current frame
         self.status = defaultdict(bool)
@@ -60,14 +66,22 @@ class SPTAM(object):
             self.loop_closing.stop()
 
     def initialize(self, frame):
+        """Use stereo triangulation to initialize the map   
+
+        Args:
+            frame (StereoFrame): new incoming stereo frames(with feature extracted)
+        """
         mappoints, measurements = frame.triangulate()
         assert len(mappoints) >= self.params.init_min_points, (
             'Not enough points to initialize map.')
-
+        # The first frame is always KF
         keyframe = frame.to_keyframe()
+        # The first keyframe should be fixed
         keyframe.set_fixed(True)
         self.graph.add_keyframe(keyframe)
+        # All the measurements and mappoints are anchored to this very keyframe
         self.mapping.add_measurements(keyframe, mappoints, measurements)
+        
         if self.loop_closing is not None:
             self.loop_closing.add_keyframe(keyframe)
 
@@ -80,13 +94,27 @@ class SPTAM(object):
             frame.timestamp, frame.position, frame.orientation)
 
     def track(self, frame):
+        """
+        - Step 1: predict the pose with constant velocity model to get predicted_pose
+        - Step 2: use the sptam.preceding and self.reference frames as seed frame to extract
+                  the local map points (sptam.filter_points(frame)), which can be viewed within current 
+                  frame with the initial pose estimation
+        - Step 3: Find the 2D image matchings with 3D map points' feature descriptors. Also update
+                  the feature descriptor for the matched 3D map points to inprove the long term tracking capability
+        - Step 4: Update the self.reference frame by querying the graph to find which frame 
+                  has containts the most of current local map points set
+        - Step 5: Do a motion only BA to refine the current frame pose
+        - Step 6: Promote current frame to be KF if
+                    - a. number of matched 3D map points is less than 20
+                    - b. ration between matched 3D map points in current frame vs reference frame is less than a threhsold
+        """
         while self.is_paused():
             time.sleep(1e-4)
         self.set_tracking(True)
 
         self.current = frame
         print('Tracking:', frame.idx, ' <- ', self.reference.id, self.reference.idx)
-
+        # Step 1: predict the pose
         predicted_pose, _ = self.motion_model.predict_pose(frame.timestamp)
         frame.update_pose(predicted_pose)
 
@@ -99,25 +127,29 @@ class SPTAM(object):
                 frame.update_pose(estimated_pose)
                 self.motion_model.apply_correction(self.loop_correction)
                 self.loop_correction = None
-
+        # Step 2: find the local map points using self.reference and self.preceding
+        # frame as seed
         local_mappoints = self.filter_points(frame)
+        # Step 3: find the matching of the 3D map points in current image with descriptor
         measurements = frame.match_mappoints(
             local_mappoints, Measurement.Source.TRACKING)
 
         print('measurements:', len(measurements), '   ', len(local_mappoints))
 
         tracked_map = set()
+        # Update the map point feature descripotr
         for m in measurements:
             mappoint = m.mappoint
             mappoint.update_descriptor(m.get_descriptor())
             mappoint.increase_measurement_count()
             tracked_map.add(mappoint)
-        
         try:
+            # Find which KF contains the most seedpoints
             self.reference = self.graph.get_reference_frame(tracked_map)
 
             pose = self.tracker.refine_pose(frame.pose, frame.cam, measurements)
             frame.update_pose(pose)
+            
             self.motion_model.update_pose(
                 frame.timestamp, pose.position(), pose.orientation())
             tracking_is_ok = True
@@ -140,9 +172,17 @@ class SPTAM(object):
 
 
     def filter_points(self, frame):
+        """Use the preceding and reference frame as seeds to extrat the local 
+        3D map points.
+        - Step 1: Use preceding and reference as seed to get a set of local 3D map points
+        - Step 2: Remove the map points which cannot be viewed by the current frame with the initial estimate pose
+        - Step 3: Add the 3d points in the preceding and reference frames into the list
+        """
+        # get local 3D map points 
         local_mappoints = self.graph.get_local_map_v2(
             [self.preceding, self.reference])[0]
 
+        # Check whether those map points are within the frustrum of current view point
         can_view = frame.can_view(local_mappoints)
         print('filter points:', len(local_mappoints), can_view.sum(), 
             len(self.preceding.mappoints()),
@@ -158,6 +198,8 @@ class SPTAM(object):
             filtered.append(pt)
             checked.add(pt)
 
+        # Add the 3D map points with in the preceding and reference frames
+        # into the local map points
         for reference in set([self.preceding, self.reference]):
             for pt in reference.mappoints():  # neglect can_view test
                 if pt in checked or pt.is_bad():
@@ -265,6 +307,7 @@ if __name__ == '__main__':
 
     durations = []
     for i in range(len(dataset))[:100]:
+    # for i in range(len(dataset)):
         featurel = ImageFeature(dataset.left[i], params)
         featurer = ImageFeature(dataset.right[i], params)
         timestamp = dataset.timestamps[i]

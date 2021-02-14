@@ -128,6 +128,11 @@ class CovisibilityGraph(object):
             return self.pts.copy()
 
     def add_keyframe(self, kf):
+        """Add the new keyframe into the keyframe list and a set
+
+        Args:
+            kf (KeyFrame): the new keyframe to be added to the map
+        """
         with self._lock:
             self.kfs.append(kf)
             self.kfs_set.add(kf)
@@ -147,17 +152,33 @@ class CovisibilityGraph(object):
                 pass
 
     def add_measurement(self, kf, pt, meas):
+        """Add the new keyframe, mappoint and measurement into the map
+
+        Args:
+            kf (KeyFrame): The new to be added KeyFrame
+            pt (MapPoint): The new to be added MapPoint
+            meas (Measurement):  The new to be added Measurement
+        """
         with self._lock:
+            # Ignore the keyframe or mappints which are not in the map
+            # So for the new keyframe or map point make sure you have called
+            # graph.add_mappoint(mappoint) and graph.add_keyframe(keyframe) first
+            # before calling this function
             if kf not in self.kfs_set or pt not in self.pts:
                 return
 
             for m in pt.measurements():
+                # If this mappoint is from current kf, doing nothing
                 if m.keyframe == kf:
                     continue
+                # the new kf can observe the same mappoint with m.keyframe
+                # update the number of the shared mappoint information of the covisiblity
+                # graph
                 kf.add_covisibility_keyframe(m.keyframe)
                 m.keyframe.add_covisibility_keyframe(kf)
-
+            # Update the meas the keyframe to be the new kf
             meas.keyframe = kf
+            # update the meas's mappoint to be the new mappoint
             meas.mappoint = pt
             kf.add_measurement(meas)
             pt.add_measurement(meas)
@@ -184,6 +205,8 @@ class CovisibilityGraph(object):
                 raise TypeError
 
     def get_reference_frame(self, seedpoints):
+        """Find which KF contains the most seedpoints
+        """
         assert len(seedpoints) > 0
         visible = [pt.keyframes() for pt in seedpoints]
         visible = Counter(chain(*visible))
@@ -207,9 +230,27 @@ class CovisibilityGraph(object):
         return local_map, local_keyframes
 
     def get_local_map_v2(self, seedframes, window_size=12, loop_window_size=8):
+        """Extract the local 3D map points using the seedframes
+        - Step 1: find all the covisiable frames with the seed frame
+        - Step 2: sort those frames based on the weight which is number of shared measurements
+        - Step 3: only keep the frames within the last 50 frames
+        - Step 4: only keep the frames within window_size
+        - Step 5: only keep loop_window_size number of frames
+        - Step 6: extract the 3D map points anchored on those survied keyframes
+        Args:
+            seedframes: frames most close to the current frame. Usually reference or preceding frame
+            window_size (int, optional): [description]. Defaults to 12.
+            loop_window_size (int, optional): [description]. Defaults to 8.
+
+        Returns:
+            local 3D map points and local keyframes
+        """
+        # Get all the covisiable frames of the seed frames 
         covisible = []
         for kf in set(seedframes):
             covisible.append(Counter(kf.covisibility_keyframes()))
+        
+        
         covisible = sum(covisible, Counter())
         for kf in set(seedframes):
             covisible[kf] = float('inf')

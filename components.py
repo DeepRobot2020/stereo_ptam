@@ -13,8 +13,6 @@ from covisibility import GraphMapPoint
 from covisibility import GraphMeasurement
 
 
-
-
 class Camera(object):
     def __init__(self, fx, fy, cx, cy, width, height, 
             frustum_near, frustum_far, baseline):
@@ -222,6 +220,14 @@ class StereoFrame(Frame):
         return measurements
 
     def triangulate(self):
+        """Create new map points and measurements
+        - Step 1: get the unmatched left, right keypoints
+        - Step 2: do the triangulation
+        - Step 3: create the measurements
+        Returns:
+            List of MapPoint: mappoints
+            List of Measurement: measurements
+        """
         kps_left, desps_left, idx_left = self.left.get_unmatched_keypoints()
         kps_right, desps_right, idx_right = self.right.get_unmatched_keypoints()
 
@@ -235,6 +241,7 @@ class StereoFrame(Frame):
                 Measurement.Source.TRIANGULATION,
                 [kps_left[i], kps_right[j]],
                 [desps_left[i], desps_right[j]])
+            
             meas.mappoint = mappoint
             meas.view = self.transform(mappoint.position)
             measurements.append(meas)
@@ -245,6 +252,17 @@ class StereoFrame(Frame):
         return mappoints, measurements
 
     def triangulate_points(self, kps_left, desps_left, kps_right, desps_right):
+        """Triangulate the new map points in the world frame with left and right keypoints and their descriptor
+
+        Args:
+            kps_left ([type]): [description]
+            desps_left ([type]): [description]
+            kps_right ([type]): [description]
+            desps_right ([type]): [description]
+
+        Returns:
+            [type]: [description]
+        """
         matches = self.feature.row_match(
             kps_left, desps_left, kps_right, desps_right)
         assert len(matches) > 0
@@ -253,8 +271,8 @@ class StereoFrame(Frame):
         px_right = np.array([kps_right[m.trainIdx].pt for m in matches])
 
         points = cv2.triangulatePoints(
-            self.left.projection_matrix, 
-            self.right.projection_matrix, 
+            self.left.projection_matrix,   # Left projection matrix embedded with world pose
+            self.right.projection_matrix,  # Right projection matrix embedded with world pose
             px_left.transpose(), 
             px_right.transpose() 
             ).transpose()  # shape: (N, 4)
@@ -431,7 +449,7 @@ class Measurement(GraphMeasurement):
         self.keypoints = keypoints
         self.descriptors = descriptors
         self.view = None    # mappoint's position in current coordinates frame
-
+        self.mappoint = None
         self.xy = np.array(self.keypoints[0].pt)
         if self.is_stereo():
             self.xyx = np.array([

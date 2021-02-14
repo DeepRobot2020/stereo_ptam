@@ -131,10 +131,17 @@ class LocalBA(object):
                     self.measurements.append(m)
 
     def update_points(self):
+        """Update all the mappointss position after BA
+        """
         for mappoint in self.mappoints:
             mappoint.update_position(self.optimizer.get_point(mappoint.id))
 
     def update_poses(self):
+        """Update the below information of all the keyframes used in BA
+        - a. keyframe poses
+        - b. reference_constraint: transformation from reference frame to current keyframe
+        - c. preceding_constraint: transformation from preceding frame to current keyframe
+        """
         for keyframe in self.keyframes:
             keyframe.update_pose(self.optimizer.get_pose(keyframe.id))
             keyframe.update_reference()

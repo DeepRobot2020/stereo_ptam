@@ -21,48 +21,141 @@ class Mapping(object):
         self.optimizer = LocalBA()
 
     def add_keyframe(self, keyframe, measurements):
+        """Add a new keyframe from the tracking thread into the map
+            - Step 1. Add the keyframe to the covisiblity graph
+            - Step 2.  Create the new map points from triangulation with the unmatched
+             keypoints from the left and right images (no matching with the local map points)
+        Args:
+            keyframe ([type]): [description]
+            measurements ([type]): [description]
+        """
         self.graph.add_keyframe(keyframe)
+        # Triangulate the unmatched keypoints within the stereo pair after the local mappoint tracking`
         self.create_points(keyframe)
-
+        # Add the measurments into the co-graph
         for m in measurements:
             self.graph.add_measurement(keyframe, m.mappoint, m)
 
+        # why clear the local_keyframes list?
         self.local_keyframes.clear()
         self.local_keyframes.append(keyframe)
 
+        # Find the covisible keyframes 
         self.fill(self.local_keyframes, keyframe)
         self.refind(self.local_keyframes, self.get_owned_points(keyframe))
 
         self.bundle_adjust(self.local_keyframes)
         self.points_culling(self.local_keyframes)
+        
+    def create_points(self, keyframe):
+        """Create new mappoints throught stereo triangulation with the yet unmatched keypoints
 
+        Args:
+            keyframe (KeyFrame): input newly added keyframe
+        """
+        mappoints, measurements = keyframe.triangulate()
+        self.add_measurements(keyframe, mappoints, measurements)
+        
+        
     def fill(self, keyframes, keyframe):
+        """Find the top local_window_size covisible keyframes with the input keyframe and store 
+        the results into the list of keyframes.
+        Args:
+            keyframes (list of Keyframe): output list of covisible keyframes
+            keyframe (Keyframe): input keyframe
+        """
+        # Sort all the covisible frames by their weight (shared measurements)
         covisible = sorted(
             keyframe.covisibility_keyframes().items(), 
             key=lambda _:_[1], reverse=True)
 
+        # Keep local_window_size covisible frames
         for kf, n in covisible:
             if n > 0 and kf not in keyframes and self.is_safe(kf):
                 keyframes.append(kf)
                 if len(keyframes) >= self.params.local_window_size:
                     return
 
-    def create_points(self, keyframe):
-        mappoints, measurements = keyframe.triangulate()
-        self.add_measurements(keyframe, mappoints, measurements)
-
     def add_measurements(self, keyframe, mappoints, measurements):
+        """Add the keyframe, mappoints, measurements into the map, also
+            increase the measurement count for the map points
+        Args:
+            keyframe (KeyFrame): The new keyframe
+            mappoints (list of MapPoint): the new map points
+            measurements (list of Measurement): the new measurements
+        """
         for mappoint, measurement in zip(mappoints, measurements):
             self.graph.add_mappoint(mappoint)
             self.graph.add_measurement(keyframe, mappoint, measurement)
             mappoint.increase_measurement_count()
+            
+    def get_owned_points(self, keyframe):
+        """Get the mappoints anchored to current keyframe, usually refers to those mappoints
+        from stereo triangulation.
 
+        Args:
+            keyframe (KeyFrame): current keyframe
+
+        Returns:
+            [type]: [description]
+        """
+        owned = []
+        for m in keyframe.measurements():
+            if m.from_triangulation():
+                owned.append(m.mappoint)
+        return owned
+    
+    def filter_unmatched_points(self, keyframe, mappoints):
+        ''' For the map points where within frustrum and there is no
+            measurement, we will stort them into filtered
+        '''
+        filtered = []
+        for i in np.where(keyframe.can_view(mappoints))[0]:
+            pt = mappoints[i]
+            if (not pt.is_bad() and 
+                not self.graph.has_measurement(keyframe, pt)):
+                filtered.append(pt)
+        return filtered
+
+
+    def refind(self, keyframes, new_mappoints):    # time consuming
+        ''' For the new map points which does not have measurement in current 
+            keyframe, will try to find again on those keyframes, if found
+            those measurements will be marked as Source.REFIND measurements
+        '''
+        if len(new_mappoints) == 0:
+            return
+        for keyframe in keyframes:
+            # Find the 3D points which has no measurement in current KF
+            filtered = self.filter_unmatched_points(keyframe, new_mappoints)
+            if len(filtered) == 0:
+                continue
+            for mappoint in filtered:
+                mappoint.increase_projection_count()
+            # Find matchings in current KF
+            measuremets = keyframe.match_mappoints(filtered, Measurement.Source.REFIND)
+
+            for m in measuremets:
+                self.graph.add_measurement(keyframe, m.mappoint, m)
+                m.mappoint.increase_measurement_count()
+                
     def bundle_adjust(self, keyframes):
+        """Run BA to refine the map: Keyframes pose + mappoints
+
+        Args:
+            keyframes ([type]): [description]
+
+        Returns:
+            [type]: [description]
+        """
+        # adjust_keyframes: all the keyframes which are not fixed
         adjust_keyframes = set()
         for kf in keyframes:
             if not kf.is_fixed():
                 adjust_keyframes.add(kf)
 
+        # The covisiable frames of all the KF of adjust_keyframes but not inside adjust_keyframes
+        # This is to avoid the local BA will change the global map too much
         fixed_keyframes = set()
         for kf in adjust_keyframes:
             for ck, n in kf.covisibility_keyframes().items():
@@ -77,43 +170,12 @@ class Mapping(object):
         self.optimizer.update_points()
 
         if completed:
+            # Remove the measurement whose reprojection errors are too larget
             self.remove_measurements(self.optimizer.get_bad_measurements())
         return completed
 
     def is_safe(self, keyframe):
         return True
-
-    def get_owned_points(self, keyframe):
-        owned = []
-        for m in keyframe.measurements():
-            if m.from_triangulation():
-                owned.append(m.mappoint)
-        return owned
-
-    def filter_unmatched_points(self, keyframe, mappoints):
-        filtered = []
-        for i in np.where(keyframe.can_view(mappoints))[0]:
-            pt = mappoints[i]
-            if (not pt.is_bad() and 
-                not self.graph.has_measurement(keyframe, pt)):
-                filtered.append(pt)
-        return filtered
-
-    def refind(self, keyframes, new_mappoints):    # time consuming
-        if len(new_mappoints) == 0:
-            return
-        for keyframe in keyframes:
-            filtered = self.filter_unmatched_points(keyframe, new_mappoints)
-            if len(filtered) == 0:
-                continue
-            for mappoint in filtered:
-                mappoint.increase_projection_count()
-
-            measuremets = keyframe.match_mappoints(filtered, Measurement.Source.REFIND)
-
-            for m in measuremets:
-                self.graph.add_measurement(keyframe, m.mappoint, m)
-                m.mappoint.increase_measurement_count()
 
     def remove_measurements(self, measurements):
         for m in measurements:
